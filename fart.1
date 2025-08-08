@@ -1,0 +1,415 @@
+#!/usr/bin/env python3
+# fart_symphony_groq.py
+# THE TOTALITY ENGINE: Fart-to-Symphony AI Pipeline v1.0 - Groq Edition
+# (c) Cartman Instruments Unlimited - 1962 Neo-Orangic Edition
+
+import os
+import time
+import numpy as np
+import gradio as gr
+from scipy.io import wavfile
+import matplotlib.pyplot as plt
+from PIL import Image, ImageDraw, ImageFont
+import io
+import base64
+import random
+from datetime import datetime
+
+# ========== CONSTANTS & CONFIG ==========
+AUDIO_DIR = "audio_samples"
+os.makedirs(AUDIO_DIR, exist_ok=True)
+
+THEMES = [
+    "poetic", "mythological", "detective", "scientific",
+    "historical", "culinary", "fantasy", "sports"
+]
+
+FART_TYPES = {
+    "bass drop": "💣", "squeaker": "🐭", "rippler": "🌊", 
+    "whistler": "🧝‍♂️", "gurgler": "🥣", "machinegun": "🔫",
+    "question fart": "❓", "wet one": "💦", "invisible": "👻", 
+    "surprise": "🎁"
+}
+
+# ========== NEUROMORPHIC ORANGE THEME ==========
+NEURO_CSS = """
+:root {
+    --neuro-primary: #ff8c00;
+    --neuro-secondary: #ff4500;
+    --neuro-dark: #1a1a1a;
+    --neuro-light: #2a2a2a;
+    --neuro-glow: rgba(255, 140, 0, 0.3);
+}
+
+body {
+    background: linear-gradient(135deg, var(--neuro-dark) 0%, #0a0a0a 100%);
+    color: var(--neuro-primary);
+    font-family: 'Courier New', monospace;
+}
+
+.gr-box {
+    background: rgba(26, 26, 26, 0.7) !important;
+    border: 1px solid var(--neuro-primary) !important;
+    border-radius: 12px !important;
+    box-shadow: 
+        5px 5px 10px rgba(0, 0, 0, 0.5),
+        -5px -5px 10px rgba(50, 50, 50, 0.2),
+        inset 2px 2px 5px rgba(0, 0, 0, 0.3),
+        inset -2px -2px 5px rgba(50, 50, 50, 0.1);
+    backdrop-filter: blur(10px);
+}
+
+.gr-button {
+    background: linear-gradient(145deg, #e67e00, #ff8c00) !important;
+    border: none !important;
+    border-radius: 50px !important;
+    color: #1a1a1a !important;
+    font-weight: bold !important;
+    text-transform: uppercase !important;
+    letter-spacing: 1px !important;
+    box-shadow: 
+        3px 3px 6px rgba(0, 0, 0, 0.4),
+        -3px -3px 6px rgba(100, 60, 0, 0.2) !important;
+    transition: all 0.3s ease !important;
+}
+
+.gr-button:hover {
+    box-shadow: 
+        1px 1px 3px rgba(0, 0, 0, 0.4),
+        -1px -1px 3px rgba(100, 60, 0, 0.2),
+        inset 2px 2px 4px rgba(0, 0, 0, 0.3),
+        inset -2px -2px 4px rgba(255, 140, 0, 0.2) !important;
+}
+
+h1, h2, h3, h4 {
+    color: var(--neuro-primary) !important;
+    text-shadow: 0 0 8px var(--neuro-glow) !important;
+    letter-spacing: 1px !important;
+}
+
+@keyframes psychedelic {
+    0% { filter: hue-rotate(0deg); }
+    100% { filter: hue-rotate(360deg); }
+}
+
+.neuro-glow {
+    animation: psychedelic 8s linear infinite;
+}
+
+.fart-board {
+    background: rgba(30, 20, 0, 0.2);
+    border: 1px solid var(--neuro-primary);
+    border-radius: 12px;
+    padding: 15px;
+    box-shadow: 
+        0 0 10px var(--neuro-glow),
+        inset 0 0 5px rgba(255, 140, 0, 0.2);
+}
+"""
+
+# ========== AUDIO PROCESSING ==========
+def save_wav(audio, sr):
+    audio = np.clip(audio, -1, 1)
+    audio16 = (audio * 32767).astype(np.int16)
+    fname = f"fart_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+    path = os.path.join(AUDIO_DIR, fname)
+    wavfile.write(path, sr, audio16)
+    return path
+
+def make_waveform(audio, sr):
+    t = np.linspace(0, len(audio)/sr, len(audio))
+    fig = plt.figure(figsize=(8, 3), facecolor='none')
+    ax = fig.add_subplot(111)
+    ax.plot(t, audio, color='#ff8c00', linewidth=1.5)
+    ax.set_title("FART WAVEFORM", color='#ff8c00')
+    ax.set_xlabel("Time (s)", color='#ff8c00')
+    ax.set_ylabel("Amplitude", color='#ff8c00')
+    ax.tick_params(colors='#ff8c00')
+    ax.spines['bottom'].set_color('#ff8c00')
+    ax.spines['top'].set_color('#ff8c00') 
+    ax.spines['right'].set_color('#ff8c00')
+    ax.spines['left'].set_color('#ff8c00')
+    ax.set_facecolor('#1a1a1a')
+    fig.patch.set_alpha(0.0)
+    plt.tight_layout()
+    
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", transparent=True)
+    plt.close(fig)
+    buf.seek(0)
+    return Image.open(buf)
+
+def make_spectrogram(audio, sr):
+    fig = plt.figure(figsize=(8, 3), facecolor='none')
+    ax = fig.add_subplot(111)
+    ax.specgram(audio, Fs=sr, cmap='hot', 
+               vmin=-20, vmax=50, 
+               scale='dB', scale_by_freq=True)
+    ax.set_title("FART SPECTROGRAM", color='#ff8c00')
+    ax.set_xlabel("Time (s)", color='#ff8c00')
+    ax.set_ylabel("Frequency (Hz)", color='#ff8c00')
+    ax.tick_params(colors='#ff8c00')
+    ax.spines['bottom'].set_color('#ff8c00')
+    ax.spines['top'].set_color('#ff8c00') 
+    ax.spines['right'].set_color('#ff8c00')
+    ax.spines['left'].set_color('#ff8c00')
+    ax.set_facecolor('#1a1a1a')
+    fig.patch.set_alpha(0.0)
+    plt.tight_layout()
+    
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", transparent=True)
+    plt.close(fig)
+    buf.seek(0)
+    return Image.open(buf)
+
+# ========== FEATURE ANALYSIS ==========
+def analyze_fart(audio, sr):
+    duration = len(audio) / sr
+    
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    
+    # Calculate RMS energy (pressure)
+    rms = np.sqrt(np.mean(audio**2))
+    
+    # Calculate pitch using FFT
+    fft = np.fft.rfft(audio)
+    frequencies = np.fft.rfftfreq(len(audio), 1/sr)
+    magnitude = np.abs(fft)
+    pitch = frequencies[np.argmax(magnitude)] if len(frequencies) > 0 else 0
+    
+    # Simple complexity measure
+    spectral_flatness = np.exp(np.mean(np.log(magnitude + 1e-10))) / (np.mean(magnitude) + 1e-10)
+    
+    # Mood classification
+    if pitch > 1000 or rms > 0.5:
+        mood = "EXCITED"
+    elif pitch > 500:
+        mood = "HAPPY"
+    else:
+        mood = "CHILL"
+    
+    return {
+        'duration': duration,
+        'pressure': float(rms),
+        'pitch': float(pitch),
+        'complexity': float(spectral_flatness),
+        'mood': mood
+    }
+
+# ========== GROQ-OPTIMIZED TEXT GEN ==========
+def generate_narrative(feats, theme):
+    # Groq-friendly template-based generation
+    templates = {
+        "poetic": [
+            f"A haiku for your {feats['mood'].lower()} fart:\n"
+            f"Duration: {feats['duration']:.2f}s\n"
+            f"Pitch: {feats['pitch']:.0f}Hz\n"
+            "A symphony of gas\n"
+            "Echoes in the silent room\n"
+            "Nature's brief concert"
+        ],
+        "mythological": [
+            f"Behold! The {random.choice(['Dragon', 'Griffin', 'Phoenix'])} of Flatulence!\n"
+            f"With mood: {feats['mood']}\n"
+            f"Pressure: {feats['pressure']:.3f}\n"
+            "A mythical beast born of beans and courage."
+        ],
+        "scientific": (
+            "FART ANALYSIS REPORT\n"
+            "-------------------\n"
+            f"Duration: {feats['duration']:.2f}s\n"
+            f"Peak Frequency: {feats['pitch']:.0f}Hz\n"
+            f"Pressure: {feats['pressure']:.3f}Pa\n"
+            f"Complexity: {feats['complexity']:.2f}\n"
+            "Conclusion: This emission exhibits characteristics of "
+            f"a {random.choice(['Type-III', 'Class B', 'Gamma-grade'])} flatulence event."
+        )
+    }
+    
+    return random.choice(templates.get(theme, templates["poetic"]))
+
+def choose_theme():
+    return random.choice(THEMES)
+
+# ========== FART CLASSIFICATION ==========
+def classify_fart_type(pitch, pressure):
+    if pressure > 0.5 and pitch < 200:
+        return "bass drop"
+    elif pitch > 800:
+        return "whistler"
+    elif 200 < pitch < 600 and pressure > 0.3:
+        return "rippler"
+    elif pressure < 0.1:
+        return "invisible"
+    else:
+        return "surprise"
+
+def type_to_emoji(fart_type):
+    return FART_TYPES.get(fart_type, "🎵")
+
+def fart_type_tag(pitch, pressure):
+    fart_type = classify_fart_type(pitch, pressure)
+    return f"{type_to_emoji(fart_type)} {fart_type.title()}"
+
+# ========== VISUALIZATION UTILS ==========
+def create_neuro_card(title, value):
+    return f"""
+    <div class="fart-board">
+        <h4 style="margin:0;color:#ff8c00">{title}</h4>
+        <h3 style="margin:0;color:#ff4500">{value}</h3>
+    </div>
+    """
+
+def create_fart_badge(pitch, pressure):
+    tag = fart_type_tag(pitch, pressure)
+    return f"""
+    <div class="fart-board" style="text-align:center">
+        <h3 style="margin:0;color:#ff8c00">FART TYPE</h3>
+        <h2 style="margin:0;color:#ff4500">{tag}</h2>
+    </div>
+    """
+
+# ========== PIPELINE ==========
+def full_fart_pipeline(audio_tuple):
+    if not audio_tuple:
+        return None, None, "", "", "", "", "", "", ""
+    
+    sr, audio = audio_tuple
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    
+    # Save audio
+    wav_path = save_wav(audio, sr)
+    
+    # Analyze features
+    feats = analyze_fart(audio, sr)
+    
+    # Generate visuals
+    waveform_img = make_waveform(audio, sr)
+    spectrogram_img = make_spectrogram(audio, sr)
+    
+    # Generate content
+    theme = choose_theme()
+    narrative = generate_narrative(feats, theme)
+    fart_badge = create_fart_badge(feats['pitch'], feats['pressure'])
+    
+    # Create neuro cards
+    pressure_card = create_neuro_card("PRESSURE", f"{feats['pressure']:.3f}")
+    pitch_card = create_neuro_card("PITCH", f"{feats['pitch']:.0f} Hz")
+    duration_card = create_neuro_card("DURATION", f"{feats['duration']:.2f} s")
+    mood_card = create_neuro_card("MOOD", feats['mood'])
+    theme_card = create_neuro_card("THEME", theme.title())
+    
+    return (
+        waveform_img, 
+        spectrogram_img,
+        pressure_card,
+        pitch_card,
+        duration_card,
+        mood_card,
+        theme_card,
+        narrative,
+        fart_badge
+    )
+
+# ========== GRADIO UI - 1962 NEURO-ORANGIC DESIGN ==========
+with gr.Blocks(css=NEURO_CSS, title="🔊 1962 Fartboard") as demo:
+    gr.Markdown("""
+    <div style="text-align:center">
+        <h1 class="neuro-glow">🔊 1962 FARBOARD</h1>
+        <h3>Groq-Optimized Fart-to-Symphony Interface</h3>
+        <div style="height:3px;background:linear-gradient(90deg,#ff8c00,#ff4500,#ff8c00);margin:10px auto;width:80%;border-radius:2px;"></div>
+    </div>
+    """)
+    
+    with gr.Row():
+        with gr.Column(scale=1):
+            gr.Markdown("""
+            <div class="fart-board">
+                <h3>🕹️ INSTRUCTIONS</h3>
+                <ol>
+                    <li>Record or upload fart audio</li>
+                    <li>Press LAUNCH ANALYSIS</li>
+                    <li>View your sonic fingerprint</li>
+                    <li>Get your fart classification</li>
+                </ol>
+                <p>No APIs • No Costs • Pure Orange Groq Magic</p>
+            </div>
+            """)
+            
+            with gr.Row():
+                audio_input = gr.Audio(
+                    sources=["microphone", "upload"],
+                    type="numpy",
+                    label="🎤 FART INPUT",
+                    elem_classes="fart-board"
+                )
+                
+            analyze_btn = gr.Button(
+                "🚀 LAUNCH ANALYSIS", 
+                variant="primary",
+                elem_classes="neuro-glow"
+            )
+            
+            gr.Markdown("""
+            <div class="fart-board">
+                <h3>📡 FREQUENCY BANDS</h3>
+                <ul>
+                    <li><strong>BASS</strong>: 20-250Hz</li>
+                    <li><strong>MID</strong>: 250-4kHz</li>
+                    <li><strong>TREBLE</strong>: 4k-20kHz</li>
+                </ul>
+            </div>
+            """)
+        
+        with gr.Column(scale=2):
+            with gr.Row():
+                waveform_out = gr.Image(label="WAVEFORM", interactive=False)
+                spectrogram_out = gr.Image(label="SPECTROGRAM", interactive=False)
+            
+            with gr.Row():
+                pressure_out = gr.HTML()
+                pitch_out = gr.HTML()
+                duration_out = gr.HTML()
+            
+            with gr.Row():
+                mood_out = gr.HTML()
+                theme_out = gr.HTML()
+                fart_badge = gr.HTML()
+            
+            narrative_out = gr.Textbox(
+                label="FART NARRATIVE", 
+                lines=3,
+                elem_classes="fart-board"
+            )
+    
+    gr.Markdown("""
+    <div style="text-align:center;margin-top:20px">
+        <div style="height:3px;background:linear-gradient(90deg,#ff8c00,#ff4500,#ff8c00);margin:10px auto;width:80%;border-radius:2px;"></div>
+        <p>🔊 THE TOTALITY ENGINE v1.0 • (c) 1962 Cartman Instruments Unlimited</p>
+        <p>Neo-Orangic Groq-Optimized Fartboard for LLM HF Magic</p>
+    </div>
+    """)
+    
+    # Event binding
+    analyze_btn.click(
+        fn=full_fart_pipeline,
+        inputs=audio_input,
+        outputs=[
+            waveform_out, spectrogram_out,
+            pressure_out, pitch_out, duration_out,
+            mood_out, theme_out,
+            narrative_out, fart_badge
+        ]
+    )
+
+# ========== HF SPACES DEPLOYMENT ==========
+if __name__ == "__main__":
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        show_error=True,
+        share=False
+    )
