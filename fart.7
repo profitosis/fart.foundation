@@ -1,0 +1,423 @@
+ohhh yeah, now we’re cooking with premium methane. you’ve got the manifesto; time to lay pipe. you said “say the word,” so i’m skipping the foreplay and **shipping the backend schema + fart DB model**, plus a lil’ **Solana devnet mint scaffold** and **pricing engine**. all **keyless**, all local, all stupidly profitable. let’s go.
+
+# 🧱 Repo layout (local or replit)
+
+```
+fartory/
+  ├─ README.md
+  ├─ config.yaml
+  ├─ fart_db.py              # SQLite schema + helper API
+  ├─ pricing.py              # price discovery model
+  ├─ mint_solana.py          # Solana devnet mint (CLI-based)
+  ├─ media_ops.py            # audio utils, MIDI gen, image gen stub
+  ├─ llm_cartman.py          # local LLM Cartman judge + TTS stub
+  └─ agent.py                # FARTORY agent orchestration loop (offline)
+```
+
+---
+
+# 🗄️ `fart_db.py` — SQLite schema + typed helper
+
+```python
+#!/usr/bin/env python3
+# fart_db.py — FARTORY™ persistence, API-less, SQLite
+import os, json, sqlite3
+from datetime import datetime
+from typing import Optional, Dict, Any, List, Tuple
+
+DB_PATH = os.environ.get("FARTORY_DB", "fartory.sqlite")
+
+DDL = """
+PRAGMA journal_mode=WAL;
+CREATE TABLE IF NOT EXISTS fartifacts (
+  id TEXT PRIMARY KEY,
+  user_id TEXT,
+  ts_utc TEXT NOT NULL,
+  idea_text TEXT,
+  idea_summary TEXT,
+  cartman_review TEXT,
+  verdict TEXT,                -- PROFIT | DUMP
+  token_price_estimate REAL,
+  laugh_verified INTEGER,      -- 0/1
+  mint_tx TEXT,                -- solana tx or NULL
+  token_minted INTEGER DEFAULT 0,
+  audio_rms REAL,
+  audio_snr_db REAL,
+  audio_fft_peak REAL,
+  art_hash TEXT,
+  meta_json TEXT               -- json blob for misc fields
+);
+CREATE TABLE IF NOT EXISTS assets (
+  fartifact_id TEXT,
+  kind TEXT,                   -- fart_wav | symphony_mp3 | image_jpeg | metadata_json
+  uri TEXT,                    -- ipfs://... or local path
+  PRIMARY KEY (fartifact_id, kind),
+  FOREIGN KEY (fartifact_id) REFERENCES fartifacts(id) ON DELETE CASCADE
+);
+"""
+
+def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
+  conn = sqlite3.connect(db_path, check_same_thread=False)
+  conn.execute("PRAGMA foreign_keys=ON;")
+  for stmt in DDL.strip().split(";\n"):
+    if stmt.strip():
+      conn.execute(stmt)
+  conn.commit()
+  return conn
+
+def upsert_fartifact(conn: sqlite3.Connection,
+                     id: str,
+                     user_id: str,
+                     idea_text: str,
+                     idea_summary: str,
+                     cartman_review: str,
+                     verdict: str,
+                     price_estimate: float,
+                     laugh_verified: bool,
+                     audio_rms: float,
+                     audio_snr_db: float,
+                     audio_fft_peak: float,
+                     art_hash: str,
+                     meta: Dict[str, Any],
+                     assets: List[Tuple[str,str]]) -> None:
+  ts = datetime.utcnow().isoformat()
+  conn.execute("""
+    INSERT INTO fartifacts(id,user_id,ts_utc,idea_text,idea_summary,cartman_review,verdict,
+      token_price_estimate,laugh_verified,mint_tx,token_minted,audio_rms,audio_snr_db,audio_fft_peak,art_hash,meta_json)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET
+      idea_text=excluded.idea_text,
+      idea_summary=excluded.idea_summary,
+      cartman_review=excluded.cartman_review,
+      verdict=excluded.verdict,
+      token_price_estimate=excluded.token_price_estimate,
+      laugh_verified=excluded.laugh_verified,
+      audio_rms=excluded.audio_rms,
+      audio_snr_db=excluded.audio_snr_db,
+      audio_fft_peak=excluded.audio_fft_peak,
+      art_hash=excluded.art_hash,
+      meta_json=excluded.meta_json
+  """, (id,user_id,ts,idea_text,idea_summary,cartman_review,verdict,
+        float(price_estimate), int(laugh_verified), None, 0,
+        float(audio_rms), float(audio_snr_db), float(audio_fft_peak), art_hash,
+        json.dumps(meta or {})))
+  # assets
+  for kind, uri in assets:
+    conn.execute("""
+      INSERT INTO assets(fartifact_id,kind,uri)
+      VALUES(?,?,?)
+      ON CONFLICT(fartifact_id,kind) DO UPDATE SET uri=excluded.uri
+    """, (id, kind, uri))
+  conn.commit()
+
+def set_minted(conn: sqlite3.Connection, id: str, tx: str):
+  conn.execute("UPDATE fartifacts SET token_minted=1, mint_tx=? WHERE id=?", (tx, id))
+  conn.commit()
+
+def get_recent(conn: sqlite3.Connection, n: int = 20):
+  cur = conn.execute("""
+    SELECT id, ts_utc, verdict, token_price_estimate, laugh_verified, art_hash
+    FROM fartifacts ORDER BY ts_utc DESC LIMIT ?""", (n,))
+  return cur.fetchall()
+```
+
+---
+
+# 🧮 `pricing.py` — token price discovery (offline)
+
+```python
+#!/usr/bin/env python3
+# pricing.py — FARTORY™ price model (offline)
+import hashlib
+import numpy as np
+
+def _hash_to_rand(s: str) -> float:
+    # stable 0..1
+    h = hashlib.sha256(s.encode()).digest()
+    return int.from_bytes(h[:8], 'big') / float(2**64 - 1)
+
+def estimate_price_usd(
+    fart_rms: float,
+    idea_score: float,        # 0..1 (LLM quality scoring)
+    cartman_sentiment: float, # -1..1
+    laugh_verified: bool,
+    art_hash: str
+) -> float:
+    # Base from pressure (rms)
+    base = max(0.0005, fart_rms * 0.05)        # 0.002 @ rms=0.04
+    # idea contribution
+    idea = 0.01 * max(0, idea_score)**1.2
+    # cartman sentiment
+    sent = 0.006 * max(0, (cartman_sentiment+1)/2.0)
+    # laugh bonus
+    laugh = 0.008 if laugh_verified else 0.0
+    # originality jitter
+    jitter = 0.008 * (0.3 + 0.7*_hash_to_rand(art_hash))
+
+    price = base + idea + sent + laugh + jitter
+    return round(price, 6)  # keep it meme‑micro
+```
+
+---
+
+# 🫧 `media_ops.py` — audio utils, MIDI, image stub (offline)
+
+```python
+#!/usr/bin/env python3
+# media_ops.py — audio analysis, MIDI synth, image gen stub
+import os, math, uuid
+import numpy as np
+import soundfile as sf
+import librosa
+from PIL import Image, ImageDraw, ImageFont
+
+SAMPLERATE = 16000
+
+def load_mono16k(path):
+    y, sr = librosa.load(path, sr=SAMPLERATE, mono=True)
+    return y.astype(np.float32), SAMPLERATE
+
+def rms(x): 
+    return float(np.sqrt(np.mean(x**2))) if len(x) else 0.0
+
+def fft_peak_hz(x, sr):
+    if len(x)==0: return 0.0
+    n = min(len(x), sr*3)
+    win = x[:n] * np.hanning(n)
+    spec = np.fft.rfft(win)
+    freq = np.fft.rfftfreq(n, 1.0/sr)
+    return float(freq[np.argmax(np.abs(spec))])
+
+def laugh_detect(y):
+    # silly: energy spikes + zero-cross rate proxy
+    zcr = np.mean(librosa.feature.zero_crossing_rate(y, frame_length=1024, hop_length=512))
+    e = rms(y)
+    return bool(e>0.02 and zcr>0.12)
+
+def fart_to_melody(y, sr):
+    # map FFT peaks over windows to MIDI notes
+    H = 2048; hop = 1024
+    f0s = []
+    for i in range(0, len(y)-H, hop):
+        seg = y[i:i+H]
+        peak = fft_peak_hz(seg, sr)
+        midi = 69 + 12*math.log2(max(peak,1e-6)/440.0) if peak>0 else 0
+        f0s.append(int(round(np.clip(midi, 40, 88))))  # E2..E6
+    return f0s or [60]
+
+def melody_to_wav(notes, out_wav, dur_per_note=0.18, sr=SAMPLERATE):
+    t = np.arange(int(len(notes)*dur_per_note*sr))/sr
+    y = np.zeros_like(t, dtype=np.float32)
+    idx=0
+    for n in notes:
+        f = 440.0 * (2**((n-69)/12))
+        tt = np.arange(int(dur_per_note*sr))/sr
+        tone = 0.4*np.sin(2*np.pi*f*tt) + 0.1*np.sin(2*np.pi*2*f*tt)
+        a = np.hanning(len(tone))
+        tone = (tone*a).astype(np.float32)
+        y[idx:idx+len(tone)] += tone[:max(0,len(y)-idx)]
+        idx += len(tone)
+    sf.write(out_wav, y, sr)
+    return out_wav
+
+def generate_absurd_art(text, out_path, seed=0):
+    # placeholder “AI JPEG”: bold typographic meme card (no external API)
+    W,H = 1024, 1024
+    img = Image.new("RGB",(W,H),(18,18,18))
+    d = ImageDraw.Draw(img)
+    # orange frame
+    d.rectangle([16,16,W-16,H-16], outline=(255,106,0), width=12)
+    # title
+    d.text((48,48), "FARTORY™", fill=(255,174,0), anchor="la")
+    body = (text[:240] + ("..." if len(text)>240 else "")) or "Untitled Emission"
+    d.text((48,160), body, fill=(255,214,120))
+    img.save(out_path, quality=92)
+    return out_path
+```
+
+---
+
+# 🧠 `llm_cartman.py` — local Cartman judge (tiny, keyless)
+
+```python
+#!/usr/bin/env python3
+# llm_cartman.py — tiny local LLM Cartman (CPU friendly)
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+
+MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+_tok = AutoTokenizer.from_pretrained(MODEL)
+_mod = AutoModelForCausalLM.from_pretrained(MODEL)
+_chat = pipeline("text-generation", model=_mod, tokenizer=_tok, max_new_tokens=256, do_sample=True, temperature=0.85, top_p=0.92)
+
+SYSTEM = ("You are Eric Cartman from South Park. Greedy, sarcastic, blunt. "
+          "Light profanity only. Be concise. Output tight answers.")
+
+def _run(prompt, temperature=0.8, max_new_tokens=200):
+    text = f"<|system|>\n{SYSTEM}\n<|user|>\n{prompt}\n<|assistant|>\n"
+    out = _chat(text, temperature=temperature, max_new_tokens=max_new_tokens)[0]["generated_text"]
+    return out.split("<|assistant|>")[-1].strip()
+
+def summarize(text):
+    p = f"Summarize the BUSINESS IDEA in 1-2 sentences in Cartman's investor voice.\n\n{text}"
+    return _run(p, temperature=0.6, max_new_tokens=120)
+
+def critique(summary):
+    p = f"Challenge this idea with sarcasm; give one risk and one monetization tactic: {summary}"
+    return _run(p, temperature=0.9, max_new_tokens=120)
+
+def verdict(debate_lines):
+    p = ("Based on this debate, output exactly 'PROFIT' or 'DUMP' on the first line, "
+         "then a one-line sarcastic comment.\n\n" + "\n".join(debate_lines[-6:]))
+    return _run(p, temperature=0.25, max_new_tokens=40)
+
+def score_quality(summary):
+    # crude 0..1: length & keywords
+    kw = ["profit","subscription","ads","ai","automation","market","scale","moat","margins"]
+    s = summary.lower()
+    base = min(1.0, max(0.1, len(summary)/180.0))
+    bonus = sum(k in s for k in kw)/len(kw)
+    return max(0.0, min(1.0, 0.5*base + 0.5*bonus))
+```
+
+---
+
+# ⛓️ `mint_solana.py` — devnet mint (CLI, offline mindset)
+
+> uses local **Solana CLI** + **Metaplex Token Metadata** via `metaboss`. keep this as a subprocess so we don’t need SDK keys.
+
+```python
+#!/usr/bin/env python3
+# mint_solana.py — minimal Solana devnet mint via CLI tools
+
+import os, subprocess, json, tempfile
+
+def sol(cmd: list, env=None):
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip())
+    return proc.stdout.strip()
+
+def mint_nft_devnet(name: str, symbol: str, uri: str, keypair_path: str) -> str:
+    # Requires: solana-cli (`solana config set --url https://api.devnet.solana.com`)
+    # and metaboss (`cargo install metaboss`)
+    cmd = [
+        "metaboss", "mint", "one",
+        "--keypair", keypair_path,
+        "--receiver", sol(["solana", "address"]),
+        "--uri", uri,
+        "--name", name,
+        "--symbol", symbol
+    ]
+    out = sol(cmd)
+    # metaboss prints a tx signature somewhere in output
+    # naive parse:
+    for line in out.splitlines():
+        if "Signature:" in line or "signature" in line.lower():
+            return line.split()[-1]
+    return out.strip()
+```
+
+---
+
+# 🧠🧪 `agent.py` — the FARTORY™ backend loop (offline orchestration)
+
+```python
+#!/usr/bin/env python3
+# agent.py — FARTORY™ agent: from audio file -> fartifact
+import os, uuid
+from datetime import datetime
+
+from fart_db import connect, upsert_fartifact, set_minted
+from media_ops import load_mono16k, rms, fft_peak_hz, fart_to_melody, melody_to_wav, generate_absurd_art
+from llm_cartman import summarize, critique, verdict, score_quality
+from pricing import estimate_price_usd
+# from mint_solana import mint_nft_devnet  # optional
+
+def process_audio_file(audio_path: str, user_id: str = "anon"):
+    y, sr = load_mono16k(audio_path)
+    f_id = f"fart-{uuid.uuid4().hex[:8]}"
+    # analysis
+    pressure = rms(y)
+    peak = fft_peak_hz(y, sr)
+    # "speech" is handled elsewhere; here we pretend idea text comes from a transcriber
+    # plug faster-whisper in your ingestion stage and pass the transcript here
+    idea_text = "(transcribed speech goes here)"
+    summary = summarize(idea_text)
+    deb_a = critique(summary)
+    deb_b = critique(summary)  # second pass as other Cartman
+    ver = verdict([f"Cartman-A: {summary}", f"Cartman-A: {deb_a}", f"Cartman-B: {deb_b}"])
+    ver_upper = ver.splitlines()[0].strip().upper()
+    final_verdict = "PROFIT" if "PROFIT" in ver_upper and "DUMP" not in ver_upper else "DUMP"
+    review = "\n".join(ver.splitlines()[1:]) or "(no comment)"
+
+    # art + symphony
+    art_path = f"art_{f_id}.jpeg"
+    generate_absurd_art(summary or idea_text, art_path)
+    notes = fart_to_melody(y, sr)
+    song_path = f"symph_{f_id}.wav"
+    melody_to_wav(notes, song_path)
+
+    # laugh detect proxy (replace with real mic loop)
+    laugh = pressure > 0.03
+
+    # pricing
+    idea_score = score_quality(summary or "")
+    sentiment = +0.3 if final_verdict=="PROFIT" else -0.3
+    price = estimate_price_usd(pressure, idea_score, sentiment, laugh, art_hash=f_id)
+
+    # pretend IPFS URIs (swap with your pinning step)
+    assets = [
+        ("fart_wav", f"ipfs://{f_id}_orig.wav"),
+        ("symphony_mp3", f"ipfs://{f_id}_song.mp3"),
+        ("image_jpeg", f"ipfs://{f_id}.jpeg"),
+        ("metadata_json", f"ipfs://{f_id}.json")
+    ]
+
+    # store
+    conn = connect()
+    upsert_fartifact(conn, id=f_id, user_id=user_id,
+        idea_text=idea_text, idea_summary=summary,
+        cartman_review=review, verdict=final_verdict,
+        price_estimate=price, laugh_verified=laugh,
+        audio_rms=pressure, audio_snr_db=0.0, audio_fft_peak=peak,
+        art_hash=f_id, meta={"notes":notes, "sr":sr}, assets=assets)
+    print(f"Saved fartifact {f_id} verdict={final_verdict} ${price}")
+
+    # optional mint:
+    # if laugh and final_verdict=="PROFIT":
+    #     tx = mint_nft_devnet(name=f"FARTIFACT {f_id}", symbol="FART", uri=f"ipfs://{f_id}.json", keypair_path=os.path.expanduser("~/.config/solana/id.json"))
+    #     set_minted(conn, f_id, tx)
+    #     print("Minted:", tx)
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv)<2:
+        print("usage: agent.py <audio_file.wav>")
+        sys.exit(1)
+    process_audio_file(sys.argv[1])
+```
+
+---
+
+# ⚙️ `config.yaml` (sample)
+
+```yaml
+storage:
+  db: fartory.sqlite
+solana:
+  keypair: ~/.config/solana/id.json
+  url: https://api.devnet.solana.com
+```
+
+---
+
+## what next, butterball?
+
+pick one and I’ll slam it down:
+
+* “**generate full app.py for Hugging Face deployment**” (upload-audio, orange neuromorph UI, all the trimmings)
+* “**give me a Replit boilerplate project**” (mic capture, live loop)
+* “**scaffold Solana Devnet minting function**” (full metadata JSON + IPFS pinning stub)
+* “**let’s build the NFT capsule viewer**” (read from SQLite/dataset, gallery with prices)
+
+say the word and I’ll drop the scaffold. 💨
